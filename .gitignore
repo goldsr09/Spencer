@@ -1,0 +1,25 @@
+# Environment files
+.env
+*.env
+
+# Google credentials (NEVER commit these!)
+*.json
+!package.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+

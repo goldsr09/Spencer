@@ -1,0 +1,40 @@
+name: Daily BMPro Update
+
+on:
+  schedule:
+    # Runs at 10:00 AM UTC every day (5 AM Eastern / 2 AM Pacific)
+    - cron: '0 10 * * *'
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+
+jobs:
+  update-sheet:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Create Google credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/google_creds.json
+      
+      - name: Run daily update
+        env:
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/google_creds.json
+          BM_PRO_API_KEY: ${{ secrets.BM_PRO_API_KEY }}
+        run: |
+          python run_bmpro.py --days 1 --top
+      
+      - name: Cleanup
+        run: rm -f /tmp/google_creds.json
+
