@@ -27,13 +27,16 @@ jobs:
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/google_creds.json
       
-      - name: Run daily update
+      - name: Run daily update (yesterday's data)
         env:
           GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/google_creds.json
           BM_PRO_API_KEY: ${{ secrets.BM_PRO_API_KEY }}
         run: |
-          python run_bmpro.py --days 1 --top
+          # Calculate yesterday's date
+          YESTERDAY=$(date -d "yesterday" +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d)
+          echo "Fetching data for: $YESTERDAY"
+          python run_bmpro.py --from $YESTERDAY --to $YESTERDAY --top
       
       - name: Cleanup
         run: rm -f /tmp/google_creds.json

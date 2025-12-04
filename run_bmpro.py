@@ -11,12 +11,22 @@ Usage:
   cd ~/Downloads
   
   # INSERT NEW ROWS (for dates not in sheet):
-  python3 run_bmpro.py --days 1825           # 5 years, append at bottom
-  python3 run_bmpro.py --days 3 --top        # 3 days, insert at top
+  python3 run_bmpro.py --days 1 --top        # Today, insert at top
+  python3 run_bmpro.py --days 7 --top        # Last week, insert at top
   
-  # UPDATE EXISTING ROWS (fill in missing metrics):
+  # UPDATE SPECIFIC DATES (fill in missing metrics):
   python3 run_bmpro.py --days 2 --update     # Update last 2 days
-  python3 run_bmpro.py --from 2025-12-01 --to 2025-12-02 --update
+  
+  # SCAN FOR ISSUES:
+  python3 run_bmpro.py --scan-only           # Find missing dates
+  python3 run_bmpro.py --scan-incomplete     # Find rows with missing data
+  python3 run_bmpro.py --scan-incomplete --min-empty 10  # Rows with 10+ empty cells
+  
+  # AUTO-FILL:
+  python3 run_bmpro.py --fill-gaps           # Fill missing dates
+  python3 run_bmpro.py --fill-incomplete     # Fill rows with missing data
+  python3 run_bmpro.py --fill-incomplete --limit 50  # Fill first 50 incomplete rows
+  python3 run_bmpro.py --fill-incomplete --from 2024-01-01 --to 2024-12-31  # Date range
 """
 
 import io
@@ -570,15 +580,331 @@ def update_existing_rows(data_by_date: Dict[str, Dict[str, Any]], btc_prices: Di
     return {"updated": rows_updated}
 
 
+def find_gaps_in_sheet(sheet_name: str = SHEET_NAME) -> List[dt.date]:
+    """
+    Scan the sheet and find missing dates in the sequence.
+    Returns a list of missing dates.
+    """
+    ssid = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
+    if not ssid:
+        raise SystemExit("GOOGLE_SHEETS_SPREADSHEET_ID missing")
+    
+    gc = get_gspread_client()
+    sh = gc.open_by_key(ssid)
+    ws = sh.worksheet(sheet_name)
+    
+    print(f"Scanning {sheet_name} for gaps...")
+    all_values = ws.get_all_values()
+    
+    if len(all_values) < 2:
+        print("No data rows found")
+        return []
+    
+    # Parse all dates from column A
+    existing_dates = set()
+    for row in all_values[1:]:  # Skip header
+        if row and row[0]:
+            try:
+                date_obj = dt.datetime.strptime(row[0].strip(), "%Y-%m-%d").date()
+                existing_dates.add(date_obj)
+            except ValueError:
+                continue
+    
+    if not existing_dates:
+        print("No valid dates found in sheet")
+        return []
+    
+    # Find the range
+    min_date = min(existing_dates)
+    max_date = max(existing_dates)
+    
+    print(f"Date range in sheet: {min_date} to {max_date}")
+    print(f"Existing dates: {len(existing_dates)}")
+    
+    # Find gaps
+    expected_dates = set()
+    current = min_date
+    while current <= max_date:
+        expected_dates.add(current)
+        current += dt.timedelta(days=1)
+    
+    missing_dates = sorted(expected_dates - existing_dates)
+    
+    print(f"Expected dates: {len(expected_dates)}")
+    print(f"Missing dates: {len(missing_dates)}")
+    
+    if missing_dates:
+        print(f"\nMissing dates:")
+        for d in missing_dates[:10]:  # Show first 10
+            print(f"  - {d}")
+        if len(missing_dates) > 10:
+            print(f"  ... and {len(missing_dates) - 10} more")
+    
+    return missing_dates
+
+
+def find_incomplete_rows(sheet_name: str = SHEET_NAME, min_empty_cols: int = 5) -> List[str]:
+    """
+    Scan the sheet and find rows that have dates but are missing significant data.
+    Returns a list of date strings that need updating.
+    """
+    ssid = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
+    if not ssid:
+        raise SystemExit("GOOGLE_SHEETS_SPREADSHEET_ID missing")
+    
+    gc = get_gspread_client()
+    sh = gc.open_by_key(ssid)
+    ws = sh.worksheet(sheet_name)
+    
+    print(f"Scanning {sheet_name} for incomplete rows...")
+    all_values = ws.get_all_values()
+    
+    if len(all_values) < 2:
+        print("No data rows found")
+        return []
+    
+    headers = all_values[0]
+    num_cols = len(headers)
+    
+    # Count how many metric columns we expect (skip Date and BTC Price)
+    expected_metric_cols = num_cols - 2  # Columns C onwards
+    
+    incomplete_dates = []
+    empty_counts = {}  # date -> number of empty cells
+    
+    for row in all_values[1:]:  # Skip header
+        if not row or not row[0]:
+            continue
+        
+        date_str = row[0].strip()
+        
+        # Count empty cells in metric columns (C onwards, index 2+)
+        empty_count = 0
+        for i in range(2, min(len(row), num_cols)):
+            if not row[i] or row[i].strip() == "":
+                empty_count += 1
+        
+        # Also count missing columns if row is shorter than headers
+        if len(row) < num_cols:
+            empty_count += num_cols - len(row)
+        
+        if empty_count >= min_empty_cols:
+            incomplete_dates.append(date_str)
+            empty_counts[date_str] = empty_count
+    
+    print(f"Total rows: {len(all_values) - 1}")
+    print(f"Incomplete rows (>= {min_empty_cols} empty metric cells): {len(incomplete_dates)}")
+    
+    if incomplete_dates:
+        print(f"\nIncomplete rows (showing first 20):")
+        for d in incomplete_dates[:20]:
+            print(f"  - {d}: {empty_counts[d]} empty cells")
+        if len(incomplete_dates) > 20:
+            print(f"  ... and {len(incomplete_dates) - 20} more")
+    
+    return incomplete_dates
+
+
+def fill_incomplete_rows(sheet_name: str = SHEET_NAME, min_empty_cols: int = 5, 
+                         limit: int = None, from_date: str = None, to_date: str = None):
+    """
+    Find rows with missing data and fill them.
+    """
+    incomplete_dates = find_incomplete_rows(sheet_name, min_empty_cols)
+    
+    if not incomplete_dates:
+        print("\n✓ All rows are complete!")
+        return {"updated": 0, "dates": []}
+    
+    # Filter by date range if specified
+    if from_date or to_date:
+        filtered = []
+        for d in incomplete_dates:
+            if from_date and d < from_date:
+                continue
+            if to_date and d > to_date:
+                continue
+            filtered.append(d)
+        incomplete_dates = filtered
+        print(f"\nFiltered to {len(incomplete_dates)} dates in range")
+    
+    # Apply limit
+    if limit and len(incomplete_dates) > limit:
+        incomplete_dates = incomplete_dates[:limit]
+        print(f"Limited to first {limit} dates")
+    
+    if not incomplete_dates:
+        print("\n✓ No dates to update after filtering")
+        return {"updated": 0, "dates": []}
+    
+    api_key = os.environ.get("BM_PRO_API_KEY")
+    if not api_key:
+        raise SystemExit("BM_PRO_API_KEY not set")
+    
+    api = BMProAPI(api_key)
+    
+    # Convert to date objects and group into ranges
+    date_objs = []
+    for d in incomplete_dates:
+        try:
+            date_objs.append(dt.datetime.strptime(d, "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    
+    date_objs.sort()
+    
+    # Group consecutive dates
+    ranges = []
+    if date_objs:
+        range_start = date_objs[0]
+        range_end = date_objs[0]
+        
+        for d in date_objs[1:]:
+            if (d - range_end).days <= 7:  # Group dates within 7 days
+                range_end = d
+            else:
+                ranges.append((range_start, range_end))
+                range_start = d
+                range_end = d
+        ranges.append((range_start, range_end))
+    
+    print(f"\nUpdating {len(date_objs)} incomplete dates in {len(ranges)} batches...")
+    
+    total_updated = 0
+    
+    for i, (start, end) in enumerate(ranges):
+        print(f"\n[{i+1}/{len(ranges)}] Fetching {start} to {end}...")
+        
+        # Fetch BTC prices
+        btc_prices = fetch_btc_prices(start, end)
+        
+        # Fetch BMPro metrics
+        batch_data = fetch_all_metrics_for_period(api, start, end)
+        
+        # Update existing rows
+        if batch_data or btc_prices:
+            result = update_existing_rows(batch_data, btc_prices, sheet_name)
+            total_updated += result.get('updated', 0)
+            print(f"✓ Updated {result.get('updated', 0)} rows")
+        
+        # Wait between batches
+        if i < len(ranges) - 1:
+            print("Waiting 5s before next batch...")
+            time.sleep(5)
+    
+    print(f"\n{'='*60}")
+    print(f"DONE! Updated {total_updated} incomplete rows")
+    print(f"{'='*60}")
+    
+    return {"updated": total_updated}
+
+
+def fill_gaps(sheet_name: str = SHEET_NAME):
+    """
+    Find gaps in the sheet and fill them with data.
+    """
+    missing_dates = find_gaps_in_sheet(sheet_name)
+    
+    if not missing_dates:
+        print("\n✓ No gaps found! Sheet is complete.")
+        return {"filled": 0, "dates": []}
+    
+    api_key = os.environ.get("BM_PRO_API_KEY")
+    if not api_key:
+        raise SystemExit("BM_PRO_API_KEY not set")
+    
+    api = BMProAPI(api_key)
+    
+    # Group consecutive dates into ranges for efficient API calls
+    ranges = []
+    range_start = missing_dates[0]
+    range_end = missing_dates[0]
+    
+    for d in missing_dates[1:]:
+        if (d - range_end).days == 1:
+            range_end = d
+        else:
+            ranges.append((range_start, range_end))
+            range_start = d
+            range_end = d
+    ranges.append((range_start, range_end))
+    
+    print(f"\nFilling {len(missing_dates)} missing dates in {len(ranges)} date ranges...")
+    
+    total_filled = 0
+    all_filled_dates = []
+    
+    for i, (start, end) in enumerate(ranges):
+        print(f"\n[{i+1}/{len(ranges)}] Fetching {start} to {end}...")
+        
+        # Fetch BTC prices
+        btc_prices = fetch_btc_prices(start, end)
+        
+        # Fetch BMPro metrics
+        batch_data = fetch_all_metrics_for_period(api, start, end)
+        
+        # Insert rows
+        if batch_data or btc_prices:
+            result = update_sheet(batch_data, btc_prices, sheet_name, insert_at_top=False)
+            total_filled += result['inserted']
+            all_filled_dates.extend(result['dates'])
+            print(f"✓ Filled {result['inserted']} dates")
+        
+        # Wait between ranges to avoid rate limits
+        if i < len(ranges) - 1:
+            print("Waiting 5s before next range...")
+            time.sleep(5)
+    
+    print(f"\n{'='*60}")
+    print(f"DONE! Filled {total_filled} gaps")
+    print(f"{'='*60}")
+    
+    return {"filled": total_filled, "dates": all_filled_dates}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pull Bitcoin Magazine Pro metrics to Sheet10")
     parser.add_argument("--from", dest="start", help="Start date YYYY-MM-DD", default=None)
     parser.add_argument("--to", dest="end", help="End date YYYY-MM-DD", default=None)
     parser.add_argument("--days", type=int, default=None, help="Number of recent days")
+    parser.add_argument("--yesterday", action="store_true", help="Pull yesterday's data only")
     parser.add_argument("--sheet", type=str, default=SHEET_NAME, help=f"Target sheet name (default: {SHEET_NAME})")
     parser.add_argument("--top", action="store_true", help="Insert new rows at top (row 2) instead of appending at bottom")
     parser.add_argument("--update", action="store_true", help="Update existing rows with missing data instead of inserting new rows")
+    parser.add_argument("--fill-gaps", action="store_true", help="Scan sheet for missing dates and fill them")
+    parser.add_argument("--scan-only", action="store_true", help="Only scan for gaps, don't fill them")
+    parser.add_argument("--scan-incomplete", action="store_true", help="Scan for rows with missing data")
+    parser.add_argument("--fill-incomplete", action="store_true", help="Fill rows that have dates but missing metrics")
+    parser.add_argument("--min-empty", type=int, default=5, help="Minimum empty cells to consider row incomplete (default: 5)")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of rows to fill (for testing)")
     args = parser.parse_args()
+    
+    # Handle scan/fill modes
+    if args.scan_only:
+        missing = find_gaps_in_sheet(args.sheet)
+        print(f"\nFound {len(missing)} missing dates")
+        return
+    
+    if args.scan_incomplete:
+        incomplete = find_incomplete_rows(args.sheet, args.min_empty)
+        print(f"\nFound {len(incomplete)} incomplete rows")
+        return
+    
+    if args.fill_gaps:
+        result = fill_gaps(args.sheet)
+        print(result)
+        return
+    
+    if args.fill_incomplete:
+        result = fill_incomplete_rows(
+            args.sheet, 
+            min_empty_cols=args.min_empty,
+            limit=args.limit,
+            from_date=args.start,
+            to_date=args.end
+        )
+        print(result)
+        return
     
     api_key = os.environ.get("BM_PRO_API_KEY")
     if not api_key:
@@ -590,6 +916,9 @@ def main():
     if args.start and args.end:
         start_date = dt.datetime.strptime(args.start, "%Y-%m-%d").date()
         end_date = dt.datetime.strptime(args.end, "%Y-%m-%d").date()
+    elif args.yesterday:
+        # Pull yesterday's finalized data
+        start_date = end_date = today - dt.timedelta(days=1)
     elif args.days:
         end_date = today
         start_date = end_date - dt.timedelta(days=args.days - 1)
