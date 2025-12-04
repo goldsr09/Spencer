@@ -57,6 +57,13 @@ SHEET_NAME = "Sheet10"  # Target sheet
 SHEETS_BATCH_SIZE = 30  # Write 30 rows at a time
 SHEETS_BATCH_DELAY = 3  # 3 seconds between sheet write batches
 
+# DCA Formula template (row number will be substituted)
+# Column CW = DCA calculation based on various indicators
+DCA_FORMULA_TEMPLATE = '''=MAX(0,200+IF(OR(E{row}="Fear",E{row}="Extreme Fear"),25*1,IF(OR(E{row}="Greed",E{row}="Extreme Greed"),-25*1,0))+IF(B{row}<F{row}*0.8,25*1,IF(B{row}>F{row}*0.97,-25*1,0))+IF(B{row}<G{row}*0.5,25*1,IF(B{row}>G{row},-25*1,0))+IF(N{row}<1,25*1.5,IF(N{row}>5,-25*1.5,0))+IF(O{row}<500,25*1,IF(O{row}>2000,-25*1,0))+IF(P{row}<0.25,25*1.5,IF(P{row}>0.65,-25*1.5,0))+IF(AE{row}<1,25*1,IF(AE{row}>1.05,-25*1,0))+IF(AF{row}<1,25*1.5,IF(AF{row}>1.3,-25*1.5,0))+IF(AG{row}<0,25*1.5,IF(AG{row}>3,-25*1.5,0))+IF(BN{row}<0.5,25*1.5,IF(BN{row}>4,-25*1.5,0))+IF(BO{row}="Buy",25*1,IF(BO{row}="Capitulation",-25*1,0)))'''
+
+# Column index for DCA (CW = column 101, 0-indexed = 100)
+DCA_COLUMN_INDEX = 100  # CW column
+
 # All metrics in the exact order from Sheet5 (columns C onwards)
 # Matches your sheet headers exactly - NO "Bitcoin Investor Tool" at start
 METRIC_SLUGS = [
@@ -409,6 +416,13 @@ def update_sheet(data_by_date: Dict[str, Dict[str, Any]], btc_prices: Dict[str, 
             value = metrics.get(slug)
             row.append(format_value(value))
         
+        # Pad row to reach DCA column (CW = column 101)
+        while len(row) < DCA_COLUMN_INDEX:
+            row.append("")
+        
+        # Add placeholder for DCA formula (will be set with correct row number later)
+        row.append("__DCA_FORMULA__")
+        
         rows_to_insert.append(row)
     
     if not rows_to_insert:
@@ -426,6 +440,15 @@ def update_sheet(data_by_date: Dict[str, Dict[str, Any]], btc_prices: Dict[str, 
             batch = rows_to_insert[i:i + SHEETS_BATCH_SIZE]
             batch_num = i // SHEETS_BATCH_SIZE + 1
             print(f"  [{batch_num}/{total_batches}] Inserting {len(batch)} rows at top...", end=" ", flush=True)
+            
+            # Set correct row numbers for DCA formulas in this batch
+            # When inserting at row 2, rows will be at 2, 3, 4, etc.
+            for j, row in enumerate(batch):
+                target_row = 2 + j
+                # Replace placeholder with actual formula
+                for k, cell in enumerate(row):
+                    if cell == "__DCA_FORMULA__":
+                        row[k] = DCA_FORMULA_TEMPLATE.format(row=target_row)
             
             try:
                 ws.insert_rows(batch, row=2, value_input_option="USER_ENTERED")
@@ -446,10 +469,21 @@ def update_sheet(data_by_date: Dict[str, Dict[str, Any]], btc_prices: Dict[str, 
             if i + SHEETS_BATCH_SIZE < len(rows_to_insert):
                 time.sleep(SHEETS_BATCH_DELAY)
     else:
+        # Get current row count for append mode
+        current_row_count = len(existing_values) + 1  # +1 because we're appending after existing
+        
         for i in range(0, len(rows_to_insert), SHEETS_BATCH_SIZE):
             batch = rows_to_insert[i:i + SHEETS_BATCH_SIZE]
             batch_num = i // SHEETS_BATCH_SIZE + 1
             print(f"  [{batch_num}/{total_batches}] Appending {len(batch)} rows...", end=" ", flush=True)
+            
+            # Set correct row numbers for DCA formulas in this batch
+            for j, row in enumerate(batch):
+                target_row = current_row_count + i + j
+                # Replace placeholder with actual formula
+                for k, cell in enumerate(row):
+                    if cell == "__DCA_FORMULA__":
+                        row[k] = DCA_FORMULA_TEMPLATE.format(row=target_row)
             
             try:
                 ws.append_rows(batch, value_input_option="USER_ENTERED")
