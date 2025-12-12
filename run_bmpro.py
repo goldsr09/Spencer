@@ -44,6 +44,13 @@ import yfinance as yf
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
+# Optional: Twilio for SMS notifications
+try:
+    from twilio.rest import Client as TwilioClient
+    TWILIO_AVAILABLE = True
+except ImportError:
+    TWILIO_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -63,6 +70,65 @@ DCA_FORMULA_TEMPLATE = '''=MAX(0,200+IF(OR(E{row}="Fear",E{row}="Extreme Fear"),
 
 # Column index for DCA (CW = column 101, 0-indexed = 100)
 DCA_COLUMN_INDEX = 100  # CW column
+
+# SMS Configuration
+SMS_TO_NUMBER = "+19177336735"  # Your number
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
+
+
+def send_sms(btc_price: float, dca_value: float, date_str: str) -> bool:
+    """Send SMS with BTC price and DCA value."""
+    if not TWILIO_AVAILABLE:
+        print("Twilio not installed. Run: pip install twilio")
+        return False
+    
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
+        print("Twilio credentials not set. Skipping SMS.")
+        return False
+    
+    try:
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+        message_body = f"""📊 Daily BTC Update ({date_str})
+
+💰 BTC Price: ${btc_price:,.2f}
+📈 DCA Amount: ${dca_value:.0f}
+
+{"🟢 BUY signal!" if dca_value >= 250 else "🟡 Hold steady" if dca_value >= 150 else "🔴 Cautious"}"""
+        
+        message = client.messages.create(
+            body=message_body,
+            from_=TWILIO_FROM_NUMBER,
+            to=SMS_TO_NUMBER
+        )
+        
+        print(f"✓ SMS sent! SID: {message.sid}")
+        return True
+        
+    except Exception as e:
+        print(f"✗ SMS failed: {e}")
+        return False
+
+
+def get_dca_value_from_sheet(sheet_name: str, row_num: int = 2) -> Optional[float]:
+    """Read the calculated DCA value from the sheet (after formula is computed)."""
+    try:
+        ssid = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
+        gc = get_gspread_client()
+        sh = gc.open_by_key(ssid)
+        ws = sh.worksheet(sheet_name)
+        
+        # Read cell CW at the specified row
+        cell_value = ws.acell(f'CW{row_num}').value
+        
+        if cell_value:
+            return float(cell_value.replace('$', '').replace(',', ''))
+        return None
+    except Exception as e:
+        print(f"Error reading DCA value: {e}")
+        return None
 
 # All metrics in the exact order from Sheet5 (columns C onwards)
 # Matches your sheet headers exactly - NO "Bitcoin Investor Tool" at start
@@ -911,6 +977,7 @@ def main():
     parser.add_argument("--fill-incomplete", action="store_true", help="Fill rows that have dates but missing metrics")
     parser.add_argument("--min-empty", type=int, default=5, help="Minimum empty cells to consider row incomplete (default: 5)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of rows to fill (for testing)")
+    parser.add_argument("--sms", action="store_true", help="Send SMS with BTC price and DCA value after update")
     args = parser.parse_args()
     
     # Handle scan/fill modes
@@ -1036,6 +1103,32 @@ def main():
     print(f"ALL DONE! Total rows {action}: {total_inserted}")
     print(f"{'='*60}")
     print(result)
+    
+    # Send SMS if requested (always send daily update)
+    if args.sms:
+        print("\nSending SMS notification...")
+        # Wait a moment for Google Sheets to calculate the formula
+        time.sleep(3)
+        
+        # Get the DCA value from the sheet (row 2 for insert-at-top)
+        if args.top:
+            row_to_read = 2
+        else:
+            # Need to get row count from sheet
+            gc_sms = get_gspread_client()
+            sh_sms = gc_sms.open_by_key(os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID"))
+            row_to_read = len(sh_sms.worksheet(args.sheet).get_all_values())
+        dca_value = get_dca_value_from_sheet(args.sheet, row_to_read)
+        
+        # Get BTC price from our data
+        if btc_prices:
+            latest_date = max(btc_prices.keys())
+            btc_price = btc_prices[latest_date]
+            
+            if dca_value is not None:
+                send_sms(btc_price, dca_value, latest_date)
+            else:
+                print("Could not read DCA value from sheet")
 
 
 if __name__ == "__main__":
