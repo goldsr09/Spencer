@@ -44,12 +44,9 @@ import yfinance as yf
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
-# Optional: Twilio for SMS notifications
-try:
-    from twilio.rest import Client as TwilioClient
-    TWILIO_AVAILABLE = True
-except ImportError:
-    TWILIO_AVAILABLE = False
+# Email-to-SMS gateway
+import smtplib
+from email.message import EmailMessage
 
 # Load environment variables
 load_dotenv()
@@ -71,44 +68,45 @@ DCA_FORMULA_TEMPLATE = '''=MAX(0,200+IF(OR(E{row}="Fear",E{row}="Extreme Fear"),
 # Column index for DCA (CW = column 101, 0-indexed = 100)
 DCA_COLUMN_INDEX = 100  # CW column
 
-# SMS Configuration
-SMS_TO_NUMBER = "+19177336735"  # Your number
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
+# Email-to-SMS Configuration (Verizon gateway)
+SMS_GATEWAY_EMAIL = "9177336735@vtext.com"
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER")  # ryan.goldstein3@gmail.com
+SMTP_PASS = os.environ.get("SMTP_PASS")  # Gmail App Password
 
 
 def send_sms(btc_price: float, dca_value: float, date_str: str) -> bool:
-    """Send SMS with BTC price and DCA value."""
-    if not TWILIO_AVAILABLE:
-        print("Twilio not installed. Run: pip install twilio")
+    """Send SMS via email-to-SMS gateway (Verizon)."""
+    if not all([SMTP_USER, SMTP_PASS]):
+        print("SMTP credentials not set (SMTP_USER, SMTP_PASS). Skipping SMS.")
         return False
     
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
-        print("Twilio credentials not set. Skipping SMS.")
-        return False
+    # Keep message short for SMS (160 char limit)
+    message_body = (
+        f"Daily BTC Update ({date_str})\n"
+        f"BTC: ${btc_price:,.2f}\n"
+        f"DCA: ${dca_value:.0f}\n"
+        f"{'BUY' if dca_value >= 250 else 'HOLD' if dca_value >= 150 else 'CAUTIOUS'}"
+    )
     
     try:
-        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        msg = EmailMessage()
+        msg["From"] = SMTP_USER
+        msg["To"] = SMS_GATEWAY_EMAIL
+        msg["Subject"] = ""  # Subject often ignored by gateways; keep blank
+        msg.set_content(message_body)
         
-        message_body = f"""📊 Daily BTC Update ({date_str})
-
-💰 BTC Price: ${btc_price:,.2f}
-📈 DCA Amount: ${dca_value:.0f}
-
-{"🟢 BUY signal!" if dca_value >= 250 else "🟡 Hold steady" if dca_value >= 150 else "🔴 Cautious"}"""
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
         
-        message = client.messages.create(
-            body=message_body,
-            from_=TWILIO_FROM_NUMBER,
-            to=SMS_TO_NUMBER
-        )
-        
-        print(f"✓ SMS sent! SID: {message.sid}")
+        print(f"✓ SMS sent via email gateway to {SMS_GATEWAY_EMAIL}")
         return True
         
     except Exception as e:
-        print(f"✗ SMS failed: {e}")
+        print(f"✗ SMS failed via email gateway: {e}")
         return False
 
 
