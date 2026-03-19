@@ -1141,19 +1141,20 @@ def main():
             row_to_read = len(sh_sms.worksheet(args.sheet).get_all_values())
         dca_value = get_dca_value_from_sheet(args.sheet, row_to_read)
 
-        # Get BTC price from our data
-        if btc_prices:
-            latest_date = max(btc_prices.keys())
-            btc_price = btc_prices[latest_date]
+        # Get BTC price for the target date (not max date, which may be
+        # today with incomplete/NaN data due to yfinance buffer)
+        target_date_str = end_date.strftime("%Y-%m-%d")
+        btc_price = btc_prices.get(target_date_str)
 
-            # Guard against NaN BTC price
-            if pd.isna(btc_price):
-                print(f"BTC price is NaN for {latest_date}, skipping SMS")
-            elif dca_value is not None:
-                print(f"  SMS values: date={latest_date}, btc=${btc_price:,.2f}, dca=${dca_value:.0f}")
-                send_sms(btc_price, dca_value, latest_date)
-            else:
-                print("Could not read DCA value from sheet, skipping SMS")
+        if btc_price is None:
+            print(f"No BTC price for target date {target_date_str}, skipping SMS")
+        elif pd.isna(btc_price):
+            print(f"BTC price is NaN for {target_date_str}, skipping SMS")
+        elif dca_value is not None:
+            print(f"  SMS values: date={target_date_str}, btc=${btc_price:,.2f}, dca=${dca_value:.0f}")
+            send_sms(btc_price, dca_value, target_date_str)
+        else:
+            print("Could not read DCA value from sheet, skipping SMS")
 
 
 if __name__ == "__main__":
