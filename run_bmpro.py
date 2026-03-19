@@ -110,19 +110,41 @@ def send_sms(btc_price: float, dca_value: float, date_str: str) -> bool:
         return False
 
 
-def get_dca_value_from_sheet(sheet_name: str, row_num: int = 2) -> Optional[float]:
+def get_dca_value_from_sheet(sheet_name: str, row_num: int = 2, max_retries: int = 3) -> Optional[float]:
     """Read the calculated DCA value from the sheet (after formula is computed)."""
     try:
         ssid = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
         gc = get_gspread_client()
         sh = gc.open_by_key(ssid)
         ws = sh.worksheet(sheet_name)
-        
-        # Read cell CW at the specified row
-        cell_value = ws.acell(f'CW{row_num}').value
-        
-        if cell_value:
-            return float(cell_value.replace('$', '').replace(',', ''))
+
+        for attempt in range(max_retries):
+            # Read cell CW at the specified row
+            cell_value = ws.acell(f'CW{row_num}').value
+            print(f"  DCA cell CW{row_num} raw value: {repr(cell_value)}")
+
+            if not cell_value:
+                print(f"  DCA cell empty (attempt {attempt + 1}/{max_retries}), waiting...")
+                time.sleep(5)
+                continue
+
+            # Skip Google Sheets error values
+            if cell_value.startswith('#'):
+                print(f"  DCA cell has formula error: {cell_value} (attempt {attempt + 1}/{max_retries}), waiting...")
+                time.sleep(5)
+                continue
+
+            parsed = float(cell_value.replace('$', '').replace(',', ''))
+
+            # Guard against NaN
+            if pd.isna(parsed):
+                print(f"  DCA value parsed as NaN from {repr(cell_value)} (attempt {attempt + 1}/{max_retries}), waiting...")
+                time.sleep(5)
+                continue
+
+            return parsed
+
+        print(f"  Failed to read valid DCA value after {max_retries} attempts")
         return None
     except Exception as e:
         print(f"Error reading DCA value: {e}")
@@ -1105,9 +1127,10 @@ def main():
     # Send SMS if requested (always send daily update)
     if args.sms:
         print("\nSending SMS notification...")
-        # Wait a moment for Google Sheets to calculate the formula
-        time.sleep(3)
-        
+        # Wait for Google Sheets to recalculate formulas after row insert
+        # (4000+ rows of DCA formulas shift when inserting at top)
+        time.sleep(10)
+
         # Get the DCA value from the sheet (row 2 for insert-at-top)
         if args.top:
             row_to_read = 2
@@ -1117,16 +1140,20 @@ def main():
             sh_sms = gc_sms.open_by_key(os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID"))
             row_to_read = len(sh_sms.worksheet(args.sheet).get_all_values())
         dca_value = get_dca_value_from_sheet(args.sheet, row_to_read)
-        
+
         # Get BTC price from our data
         if btc_prices:
             latest_date = max(btc_prices.keys())
             btc_price = btc_prices[latest_date]
-            
-            if dca_value is not None:
+
+            # Guard against NaN BTC price
+            if pd.isna(btc_price):
+                print(f"BTC price is NaN for {latest_date}, skipping SMS")
+            elif dca_value is not None:
+                print(f"  SMS values: date={latest_date}, btc=${btc_price:,.2f}, dca=${dca_value:.0f}")
                 send_sms(btc_price, dca_value, latest_date)
             else:
-                print("Could not read DCA value from sheet")
+                print("Could not read DCA value from sheet, skipping SMS")
 
 
 if __name__ == "__main__":
